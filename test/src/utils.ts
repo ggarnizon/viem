@@ -320,3 +320,4 @@ export async function setVitalikName(name: string) {
   })
 }
 
+/* c8 ignore stop */
