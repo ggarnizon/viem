@@ -31,6 +31,7 @@ import {
 } from './getTimeToFinalize.js'
 
 /**
+ * @internal
  * Portal.checkWithdrawal error messages
  * We check to see if a withdrawal is finalized by calling `portal.checkWithdrawal` and checking the revert message.
  * @see https://github.com/ethereum-optimism/optimism/blob/develop/packages/contracts-bedrock/src/L1/OptimismPortal2.sol#L431
@@ -45,7 +46,9 @@ const finalizedWithdrawalMessages = [
   'OptimismPortal: dispute game created before respected game type was updated',
   'OptimismPortal: output proposal in air-gap',
   'OptimismPortal: withdrawal has already been finalized',
-]
+] as const
+
+type CheckWithdrawalRevertMessage = (typeof finalizedWithdrawalMessages)[number]
 
 /**
  * @internal
@@ -148,28 +151,6 @@ export async function getWithdrawalStatus<
   client: Client<Transport, chain, account>,
   parameters: GetWithdrawalStatusParameters<chain, chainOverride>,
 ): Promise<GetWithdrawalStatusReturnType> {
-  const portalVersion =
-    parameters.portalVersion ??
-    (await getPortalVersion(client, parameters as any)).major
-  if (portalVersion === 2) {
-    return getWithdrawalStatusV2(client, parameters)
-  }
-  return getWithdrawalStatusV3(client, parameters)
-}
-
-/**
- * The new version of the function that uses the `portal` contract to determine the version of the protocol.
- * The oracle contract used by previous version is now deprecated and this version instead uses teh `portal`
- * contract as source of truth of the state of fault proof games.
- */
-async function getWithdrawalStatusV3<
-  chain extends Chain | undefined,
-  account extends Account | undefined,
-  chainOverride extends Chain | undefined = undefined,
->(
-  client: Client<Transport, chain, account>,
-  parameters: GetWithdrawalStatusParameters<chain, chainOverride>,
-): Promise<GetWithdrawalStatusReturnType> {
   const { chain = client.chain, receipt, targetChain } = parameters
 
   const portalAddress = (() => {
@@ -185,140 +166,57 @@ async function getWithdrawalStatusV3<
       hash: receipt.transactionHash,
     })
 
-  const [outputResult, proveResult, finalizedResult, readyToFinalize] =
-    await Promise.allSettled([
-      getL2Output(client, {
-        ...parameters,
-        l2BlockNumber: receipt.blockNumber,
-      }),
-      readContract(client, {
-        abi: portal2Abi,
-        address: portalAddress,
-        functionName: 'provenWithdrawals',
-        args: [withdrawal.withdrawalHash],
-      }),
-      readContract(client, {
-        abi: portal2Abi,
-        address: portalAddress,
-        functionName: 'finalizedWithdrawals',
-        args: [withdrawal.withdrawalHash],
-      }),
-      // To check if the withdrawal is ready to finalize we check the revert message of checkWithdrawal.
-      // If it doesn't revert it's ready to finalize
-      readContract(client, {
-        abi: portal2Abi,
-        address: portalAddress,
-        functionName: 'checkWithdrawal',
-        args: [hashWithdrawal(withdrawal)],
-      })
-        .then(() => true)
-        .catch((e: ReadContractErrorType) => {
-          if (e.name !== 'ContractFunctionExecutionError') throw e
-          if (!finalizedWithdrawalMessages.includes(e.cause.message)) throw e
-          return e
-        }),
-    ])
+  const [portalVersion, checkWithdrawalResult] = await Promise.allSettled([
+    await getPortalVersion(client, parameters as any),
+    // To check if the withdrawal is ready to finalize we check the revert message of checkWithdrawal.
+    // If it doesn't revert it's ready to finalize
+    readContract(client, {
+      abi: portal2Abi,
+      address: portalAddress,
+      functionName: 'checkWithdrawal',
+      args: [hashWithdrawal(withdrawal)],
+    }),
+  ])
 
-  // If the L2 Output is not processed yet (ie. the actions throws), this means
-  // that the withdrawal is not ready to prove.
-  if (outputResult.status === 'rejected') {
-    const error = outputResult.reason as GetL2OutputErrorType
-    if (
-      error.cause instanceof ContractFunctionRevertedError &&
-      error.cause.data?.args?.[0] ===
-        'L2OutputOracle: cannot get output for a block that has not been proposed'
+  if (portalVersion.status === 'rejected') throw portalVersion.reason
+
+  // If we are on a legacy version of optimism, we need to use legacy contracts to resolve message status
+  if (portalVersion.value.major === 2) throw new Error('add me back')
+
+  // if it didn't reject it's ready to prove
+  if (checkWithdrawalResult.status !== 'rejected') return 'ready-to-finalize'
+
+  const revertMessage: CheckWithdrawalRevertMessage =
+    checkWithdrawalResult.reason.cause?.data?.args?.[0]
+
+  if (
+    !(
+      checkWithdrawalResult.reason.cause instanceof
+      ContractFunctionRevertedError
     )
-      return 'waiting-to-prove'
-    throw error
+  )
+    throw checkWithdrawalResult.reason
+  if (!finalizedWithdrawalMessages.includes(revertMessage))
+    throw checkWithdrawalResult.reason
+
+  switch (revertMessage) {
+    case 'OptimismPortal: withdrawal has not been proven yet':
+      return 'ready-to-prove'
+    case 'OptimismPortal: withdrawal has already been finalized':
+      return 'finalized'
+    case 'OptimismPortal: output proposal has not been finalized yet':
+    case 'OptimismPortal: proven withdrawal has not matured yet':
+    case 'OptimismPortal: invalid game type':
+    case 'OptimismPortal: output proposal in air-gap':
+    case 'OptimismPortal: dispute game has been blacklisted':
+    case 'OptimismPortal: withdrawal timestamp less than dispute game creation timestamp':
+    case 'OptimismPortal: dispute game created before respected game type was updated':
+      return 'waiting-to-finalize'
+    default:
+      throw new Error(
+        `Unknown revert message ${
+          revertMessage satisfies never
+        } from checkWithdrawal`,
+      )
   }
-  if (proveResult.status === 'rejected') throw proveResult.reason
-  if (finalizedResult.status === 'rejected') throw finalizedResult.reason
-  if (readyToFinalize.status === 'rejected') throw readyToFinalize.reason
-
-  const [_, proveTimestamp] = proveResult.value
-  if (!proveTimestamp) return 'ready-to-prove'
-
-  const finalized = finalizedResult.value
-  if (finalized) return 'finalized'
-
-  return readyToFinalize ? 'ready-to-finalize' : 'waiting-to-finalize'
-}
-
-/**
- * @deprecated
- * The old getWithdrawalStatus implementation. This will be removed some
- * time after the new version of optimism is deployed.
- */
-async function getWithdrawalStatusV2<
-  chain extends Chain | undefined,
-  account extends Account | undefined,
-  chainOverride extends Chain | undefined = undefined,
->(
-  client: Client<Transport, chain, account>,
-  parameters: GetWithdrawalStatusParameters<chain, chainOverride>,
-): Promise<GetWithdrawalStatusReturnType> {
-  const { chain = client.chain, receipt, targetChain } = parameters
-
-  const portalAddress = (() => {
-    if (parameters.portalAddress) return parameters.portalAddress
-    if (chain) return targetChain!.contracts.portal[chain.id].address
-    return Object.values(targetChain!.contracts.portal)[0].address
-  })()
-
-  const [withdrawal] = getWithdrawals(receipt)
-
-  if (!withdrawal)
-    throw new ReceiptContainsNoWithdrawalsError({
-      hash: receipt.transactionHash,
-    })
-
-  const [outputResult, proveResult, finalizedResult, timeToFinalizeResult] =
-    await Promise.allSettled([
-      getL2Output(client, {
-        ...parameters,
-        l2BlockNumber: receipt.blockNumber,
-      }),
-      readContract(client, {
-        abi: portalAbi,
-        address: portalAddress,
-        functionName: 'provenWithdrawals',
-        args: [withdrawal.withdrawalHash],
-      }),
-      readContract(client, {
-        abi: portalAbi,
-        address: portalAddress,
-        functionName: 'finalizedWithdrawals',
-        args: [withdrawal.withdrawalHash],
-      }),
-      getTimeToFinalize(client, {
-        ...parameters,
-        withdrawalHash: withdrawal.withdrawalHash,
-      }),
-    ])
-
-  // If the L2 Output is not processed yet (ie. the actions throws), this means
-  // that the withdrawal is not ready to prove.
-  if (outputResult.status === 'rejected') {
-    const error = outputResult.reason as GetL2OutputErrorType
-    if (
-      error.cause instanceof ContractFunctionRevertedError &&
-      error.cause.data?.args?.[0] ===
-        'L2OutputOracle: cannot get output for a block that has not been proposed'
-    )
-      return 'waiting-to-prove'
-    throw error
-  }
-  if (proveResult.status === 'rejected') throw proveResult.reason
-  if (finalizedResult.status === 'rejected') throw finalizedResult.reason
-  if (timeToFinalizeResult.status === 'rejected')
-    throw timeToFinalizeResult.reason
-
-  const [_, proveTimestamp] = proveResult.value
-  if (!proveTimestamp) return 'ready-to-prove'
-
-  const finalized = finalizedResult.value
-  if (finalized) return 'finalized'
-
-  const { seconds } = timeToFinalizeResult.value
-  return seconds > 0 ? 'waiting-to-finalize' : 'ready-to-finalize'
 }

@@ -1,10 +1,10 @@
-import { type Chain, optimism, mainnet } from '~viem/chains/index.js'
+import { type Chain, mainnet, optimism } from '~viem/chains/index.js'
 import { createClient } from '~viem/clients/createClient.js'
 import { createPublicClient } from '~viem/clients/createPublicClient.js'
 import { http } from '~viem/clients/transports/http.js'
+import { createTestClient } from '~viem/index.js'
 import { accounts, warn } from './constants.js'
 import { createHttpServer } from './utils.js'
-import { createTestClient } from '~viem/index.js'
 
 export let anvilPortOptimism: number
 if (process.env.VITE_ANVIL_PORT_OPTIMISM) {
