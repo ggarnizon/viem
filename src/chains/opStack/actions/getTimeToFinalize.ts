@@ -1,3 +1,5 @@
+import { parseAbi } from 'abitype'
+import { readContract } from '~viem/actions/index.js'
 import {
   type MulticallErrorType,
   multicall,
@@ -12,8 +14,9 @@ import type {
   GetChainParameter,
 } from '../../../types/chain.js'
 import type { Hash } from '../../../types/misc.js'
-import { l2OutputOracleAbi, portalAbi } from '../abis.js'
+import { l2OutputOracleAbi, portal2Abi, portalAbi } from '../abis.js'
 import type { GetContractAddressParameter } from '../types/contract.js'
+import { getPortalVersion } from './getPortalVersion.js'
 
 export type GetTimeToFinalizeParameters<
   chain extends Chain | undefined = Chain | undefined,
@@ -33,7 +36,7 @@ export type GetTimeToFinalizeReturnType = {
 }
 export type GetTimeToFinalizeErrorType = MulticallErrorType | ErrorType
 
-const buffer = 10
+const buffer = 10n
 
 /**
  * Returns the time until the withdrawal transaction can be finalized. Used for the [Withdrawal](/op-stack/guides/withdrawals) flow.
@@ -92,31 +95,71 @@ export async function getTimeToFinalize<
     return Object.values(targetChain!.contracts.portal)[0].address
   })()
 
-  const [[_outputRoot, proveTimestamp, _l2OutputIndex], period] =
-    await multicall(client, {
-      allowFailure: false,
-      contracts: [
-        {
-          abi: portalAbi,
-          address: portalAddress,
-          functionName: 'provenWithdrawals',
-          args: [withdrawalHash],
-        },
-        {
-          abi: l2OutputOracleAbi,
-          address: l2OutputOracleAddress,
-          functionName: 'FINALIZATION_PERIOD_SECONDS',
-        },
-      ],
-    })
+  const portalVersion = await getPortalVersion(client, { portalAddress })
+
+  // this code block can be deleted after mainnet and testnet are >= v3
+  if (portalVersion.major < 3) {
+    const [[_outputRoot, proveTimestamp, _l2OutputIndex], period] =
+      await multicall(client, {
+        allowFailure: false,
+        contracts: [
+          {
+            abi: portalAbi,
+            address: portalAddress,
+            functionName: 'provenWithdrawals',
+            args: [withdrawalHash],
+          },
+          {
+            abi: l2OutputOracleAbi,
+            address: l2OutputOracleAddress,
+            functionName: 'FINALIZATION_PERIOD_SECONDS',
+          },
+        ],
+      })
+
+    const secondsSinceProven = Date.now() / 1000 - Number(proveTimestamp)
+    const secondsToFinalize = Number(period) - secondsSinceProven
+
+    const seconds = Math.floor(
+      secondsToFinalize < 0 ? 0 : secondsToFinalize + Number(buffer),
+    )
+    const timestamp = Date.now() + seconds * 1000
+
+    return { period: Number(period), seconds, timestamp }
+  }
+
+  const [_disputeGameProxy, proveTimestamp] = await readContract(client, {
+    abi: portal2Abi,
+    address: portalAddress,
+    functionName: 'provenWithdrawals',
+    // TODO this might be wrong it's possible we need to call hashWithdrawal(withdrawal) here
+    args: [withdrawalHash],
+  })
+
+  // TODO handle the case where there is a challenge game too
+  const proofMaturityDelaySeconds = await readContract(client, {
+    // TODO fix this abi
+    // abi: portal2Abi,
+    abi: parseAbi([
+      'function proofMaturityDelaySeconds() public view returns (uint256)',
+    ]),
+    address: portalAddress,
+    functionName: 'proofMaturityDelaySeconds',
+  })
+
+  if (proveTimestamp === 0n) {
+    // TODO type this error
+    throw new Error('Withdrawal has not been proven on L1')
+  }
 
   const secondsSinceProven = Date.now() / 1000 - Number(proveTimestamp)
-  const secondsToFinalize = Number(period) - secondsSinceProven
+  const secondsToFinalize =
+    proofMaturityDelaySeconds - BigInt(secondsSinceProven)
 
   const seconds = Math.floor(
-    secondsToFinalize < 0 ? 0 : secondsToFinalize + buffer,
+    secondsToFinalize < 0n ? 0 : Number(secondsToFinalize + buffer),
   )
   const timestamp = Date.now() + seconds * 1000
 
-  return { period: Number(period), seconds, timestamp }
+  return { period: Number(proofMaturityDelaySeconds), seconds, timestamp }
 }
