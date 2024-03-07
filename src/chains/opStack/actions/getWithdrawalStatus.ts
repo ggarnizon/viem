@@ -16,19 +16,16 @@ import type {
   GetChainParameter,
 } from '../../../types/chain.js'
 import type { TransactionReceipt } from '../../../types/transaction.js'
-import { portal2Abi, portalAbi } from '../abis.js'
+import { portal2Abi } from '../abis.js'
 import { ReceiptContainsNoWithdrawalsError } from '../errors/withdrawal.js'
 import type { GetContractAddressParameter } from '../types/contract.js'
 import {
   type GetWithdrawalsErrorType,
   getWithdrawals,
 } from '../utils/getWithdrawals.js'
-import { type GetL2OutputErrorType, getL2Output } from './getL2Output.js'
+import { type GetL2OutputErrorType } from './getL2Output.js'
 import { getPortalVersion } from './getPortalVersion.js'
-import {
-  type GetTimeToFinalizeErrorType,
-  getTimeToFinalize,
-} from './getTimeToFinalize.js'
+import { type GetTimeToFinalizeErrorType } from './getTimeToFinalize.js'
 
 /**
  * @internal

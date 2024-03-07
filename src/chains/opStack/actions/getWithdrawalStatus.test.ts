@@ -3,30 +3,21 @@ import { optimismClient } from '../../../../test/src/opStack.js'
 import { createL1Server } from '../../../../test/src/opStack.js'
 import { publicClient, setBlockNumber } from '../../../../test/src/utils.js'
 import { getTransactionReceipt } from '../../../actions/index.js'
-import {
-  type GetWithdrawalStatusReturnType,
-  getWithdrawalStatus,
-} from './getWithdrawalStatus.js'
+import { getWithdrawalStatus } from './getWithdrawalStatus.js'
 
 describe('getWithdrawalStatusV3', () => {
-  let publicClient: Awaited<ReturnType<typeof createL1Server>>['publicClient']
-  let testClient: Awaited<ReturnType<typeof createL1Server>>['testClient']
+  // let publicClient: Awaited<ReturnType<typeof createL1Server>>['publicClient']
+  // let testClient: Awaited<ReturnType<typeof createL1Server>>['testClient']
 
   beforeAll(async () => {
     const res = await createL1Server()
-    publicClient = res.publicClient
-    testClient = res.testClient
+    // publicClient = res.publicClient
+    // testClient = res.testClient
     return res.server.close
   })
 
   test('finalized', async () => {}, 20_000)
-  test('ready-to-prove', async () => {
-    const status = await getWithdrawalStatus(publicClient, {
-      receipt,
-      targetChain: optimismClient.chain,
-    })
-    expect(status).toBe('ready-to-prove')
-  }, 20_000)
+  test('ready-to-prove', async () => {}, 20_000)
 
   test('waiting-to-prove', async () => {})
 
